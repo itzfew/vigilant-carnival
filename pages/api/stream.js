@@ -41,7 +41,7 @@ export default async function handler(req, res) {
 
   const localFiles = [];
   try {
-    // Download each video
+    // Download each video to temp dir
     for (let i = 0; i < videoLinks.length; i++) {
       const localPath = path.join(tempDir, `video${i}.mp4`);
       await downloadVideo(videoLinks[i], localPath);
