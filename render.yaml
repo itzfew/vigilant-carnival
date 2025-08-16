@@ -6,4 +6,6 @@ services:
     autoDeploy: true
     envVars:
       - key: YOUTUBE_RTMP_URL
-        sync: false
+        sync: false # Set this in Render dashboard
+      - key: NODE_ENV
+        value: production
