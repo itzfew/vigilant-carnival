@@ -3,7 +3,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs-extra');
 
-ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
+ffmpeg.setFmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 
 const RTMP_URL = process.env.YOUTUBE_RTMP_URL;
 
