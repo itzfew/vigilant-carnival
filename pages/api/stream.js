@@ -2,26 +2,19 @@ require('dotenv').config();
 const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs-extra');
-const fetch = require('node-fetch');
+const axios = require('axios');
 
 ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 
 const RTMP_URL = process.env.YOUTUBE_RTMP_URL;
 
-async function downloadVideo(url, outputPath) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to download: ${url}`);
-  const dest = fs.createWriteStream(outputPath);
-  await new Promise((resolve, reject) => {
-    res.body.pipe(dest);
-    res.body.on("error", reject);
-    dest.on("finish", resolve);
-  });
-}
-
-async function createConcatFile(localFiles, concatFilePath) {
-  const content = localFiles.map(f => `file '${f}'`).join('\n');
-  await fs.writeFile(concatFilePath, content);
+async function isUrlAccessible(url) {
+  try {
+    const response = await axios.head(url, { timeout: 5000 });
+    return response.status >= 200 && response.status < 300;
+  } catch {
+    return false;
+  }
 }
 
 export default async function handler(req, res) {
@@ -29,56 +22,79 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'YOUTUBE_RTMP_URL not set in environment' });
   }
 
-  const { links } = req.query; // ?links=url1,url2
-  const videoLinks = links ? links.split(',') : [];
+  const { links } = req.query; // e.g., ?links=url1,url2
+  const videoLinks = links ? links.split(',').map(link => link.trim()).filter(link => link) : [];
 
   if (!videoLinks.length) {
     return res.status(400).json({ error: 'No video links provided' });
   }
 
-  const tempDir = path.join(process.cwd(), 'temp_videos');
+  // Validate URLs
+  const validLinks = [];
+  for (const link of videoLinks) {
+    if (await isUrlAccessible(link)) {
+      validLinks.push(link);
+    } else {
+      console.warn(`Invalid or inaccessible URL: ${link}`);
+    }
+  }
+
+  if (!validLinks.length) {
+    return res.status(400).json({ error: 'No valid video URLs provided' });
+  }
+
+  const tempDir = path.join(process.cwd(), 'temp');
   await fs.ensureDir(tempDir);
 
-  const localFiles = [];
   try {
-    // Download each video to temp dir
-    for (let i = 0; i < videoLinks.length; i++) {
-      const localPath = path.join(tempDir, `video${i}.mp4`);
-      await downloadVideo(videoLinks[i], localPath);
-      localFiles.push(localPath);
-    }
+    let currentIndex = 0;
 
-    // Create concat.txt
-    const concatFilePath = path.join(tempDir, 'concat.txt');
-    await createConcatFile(localFiles, concatFilePath);
+    const streamNextVideo = () => {
+      if (currentIndex >= validLinks.length) {
+        console.log('All videos streamed.');
+        return res.status(200).json({ message: 'Streaming completed.' });
+      }
 
-    // Run FFmpeg
-    const command = ffmpeg()
-      .input(concatFilePath)
-      .inputOptions(['-f concat', '-safe 0', '-re'])
-      .outputOptions(['-c:v copy', '-c:a aac', '-f flv'])
-      .output(RTMP_URL);
+      const currentVideo = validLinks[currentIndex];
 
-    command
-      .on('start', () => {
-        console.log('FFmpeg started streaming...');
-      })
-      .on('progress', (progress) => {
-        console.log(`Progress: ${progress.timemark}`);
-      })
-      .on('end', async () => {
-        await fs.remove(tempDir);
-        console.log('Streaming completed.');
-      })
-      .on('error', async (err) => {
-        await fs.remove(tempDir);
-        console.error('Error:', err.message);
-      })
-      .run();
+      const command = ffmpeg()
+        .input(currentVideo)
+        .inputOptions(['-re']) // Read input at native frame rate
+        .outputOptions([
+          '-c:v copy', // Copy video stream
+          '-c:a aac', // Encode audio to AAC
+          '-f flv', // Output format for RTMP
+          '-flvflags no_duration_filesize', // Improve compatibility with RTMP
+        ])
+        .output(RTMP_URL);
 
+      command
+        .on('start', () => {
+          console.log(`FFmpeg started streaming: ${currentVideo}`);
+        })
+        .on('progress', (progress) => {
+          console.log(`Progress for ${currentVideo}: ${progress.timemark}`);
+        })
+        .on('end', async () => {
+          console.log(`Finished streaming: ${currentVideo}`);
+          currentIndex++;
+          streamNextVideo(); // Stream the next video
+        })
+        .on('error', async (err) => {
+          console.error(`Error streaming ${currentVideo}:`, err.message);
+          await fs.remove(tempDir);
+          res.status(500).json({ error: `Failed to stream ${currentVideo}: ${err.message}` });
+        })
+        .run();
+    };
+
+    // Start streaming the first video
+    streamNextVideo();
+
+    // Send initial response to client
     res.status(200).json({ message: 'Streaming started. Check YouTube dashboard.' });
   } catch (err) {
     await fs.remove(tempDir);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: `Server error: ${err.message}` });
   }
 }
