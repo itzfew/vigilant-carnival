@@ -12,7 +12,7 @@ export default function Home() {
     }
 
     setIsStreaming(true);
-    setMessage('Starting stream...');
+    setMessage('Starting stream... (check Render logs or YouTube Studio for progress)');
 
     try {
       const res = await fetch(`/api/stream?links=${encodeURIComponent(links)}`);
@@ -52,6 +52,9 @@ export default function Home() {
         {isStreaming ? 'Streaming...' : 'Start Stream'}
       </button>
       {message && <p style={{ marginTop: '10px', color: message.includes('Error') ? 'red' : 'green' }}>{message}</p>}
+      <p style={{ marginTop: '20px', fontSize: '14px' }}>
+        Note: Free tier may fail due to resource limits. Check Render logs for FFmpeg reports if errors occur.
+      </p>
     </div>
   );
 }
