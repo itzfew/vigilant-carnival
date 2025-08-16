@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: youtube-ffmpeg-livestream
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: YOUTUBE_RTMP_URL
+        sync: false

@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/pages/api/:path*",
-      "destination": "/pages/api/:path*"
-    }
-  ]
-}
