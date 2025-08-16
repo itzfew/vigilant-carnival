@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/pages/api/:path*",
-      "destination": "/api/:path*"
+      "destination": "/pages/api/:path*"
     }
   ]
 }
