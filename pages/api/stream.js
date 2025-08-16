@@ -17,6 +17,17 @@ async function isUrlAccessible(url) {
   }
 }
 
+async function probeVideo(url) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(url, (err, metadata) => {
+      if (err) {
+        return reject(err);
+      }
+      resolve(metadata);
+    });
+  });
+}
+
 export default async function handler(req, res) {
   if (!RTMP_URL) {
     return res.status(500).json({ error: 'YOUTUBE_RTMP_URL not set in environment' });
@@ -29,18 +40,23 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'No video links provided' });
   }
 
-  // Validate URLs
+  // Validate URLs and probe videos
   const validLinks = [];
   for (const link of videoLinks) {
     if (await isUrlAccessible(link)) {
-      validLinks.push(link);
+      try {
+        await probeVideo(link);
+        validLinks.push(link);
+      } catch (err) {
+        console.warn(`Invalid video format for ${link}: ${err.message}`);
+      }
     } else {
-      console.warn(`Invalid or inaccessible URL: ${link}`);
+      console.warn(`Inaccessible URL: ${link}`);
     }
   }
 
   if (!validLinks.length) {
-    return res.status(400).json({ error: 'No valid video URLs provided' });
+    return res.status(400).json({ error: 'No valid or accessible video URLs provided' });
   }
 
   const tempDir = path.join(process.cwd(), 'temp');
@@ -59,18 +75,26 @@ export default async function handler(req, res) {
 
       const command = ffmpeg()
         .input(currentVideo)
-        .inputOptions(['-re']) // Read input at native frame rate
+        .inputOptions([
+          '-re', // Read input at native frame rate
+          '-analyzeduration 10000000', // Increase analysis time
+          '-probesize 10000000', // Increase probe size
+        ])
         .outputOptions([
-          '-c:v copy', // Copy video stream
+          '-c:v libx264', // Re-encode video to H.264 to avoid codec issues
+          '-preset veryfast', // Balance speed and quality
           '-c:a aac', // Encode audio to AAC
+          '-b:a 128k', // Audio bitrate
           '-f flv', // Output format for RTMP
-          '-flvflags no_duration_filesize', // Improve compatibility with RTMP
+          '-flvflags no_duration_filesize', // Improve RTMP compatibility
+          '-max_muxing_queue_size 1024', // Prevent muxing queue overflow
         ])
         .output(RTMP_URL);
 
       command
-        .on('start', () => {
+        .on('start', (commandLine) => {
           console.log(`FFmpeg started streaming: ${currentVideo}`);
+          console.log(`FFmpeg command: ${commandLine}`);
         })
         .on('progress', (progress) => {
           console.log(`Progress for ${currentVideo}: ${progress.timemark}`);
@@ -80,8 +104,9 @@ export default async function handler(req, res) {
           currentIndex++;
           streamNextVideo(); // Stream the next video
         })
-        .on('error', async (err) => {
-          console.error(`Error streaming ${currentVideo}:`, err.message);
+        .on('error', async (err, stdout, stderr) => {
+          console.error(`Error streaming ${currentVideo}: ${err.message}`);
+          console.error(`FFmpeg stderr: ${stderr}`);
           await fs.remove(tempDir);
           res.status(500).json({ error: `Failed to stream ${currentVideo}: ${err.message}` });
         })
