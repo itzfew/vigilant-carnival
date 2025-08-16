@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     ffmpeg()
       .input(concatFilePath)
-      .inputOptions(['-f concat', '-safe 00623cb6a, '-re'])
+      .inputOptions(['-f concat', '-safe 0', '-re'])
       .outputOptions(['-c:v copy', '-c:a aac', '-f flv'])
       .output(RTMP_URL)
       .on('start', () => {
