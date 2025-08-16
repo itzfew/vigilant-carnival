@@ -3,12 +3,47 @@ const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs-extra');
 const axios = require('axios');
+const os = require('os');
 
-ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
+// Use a newer FFmpeg static binary (download manually or via script)
+const FFMPEG_BINARY_URL = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz';
+const FFMPEG_PATH = path.join(os.tmpdir(), 'ffmpeg'); // Store in temp dir
+
+// Download and extract FFmpeg binary if not present (for Render)
+async function ensureFFmpegBinary() {
+  if (await fs.pathExists(FFMPEG_PATH)) return;
+  console.log('Downloading FFmpeg binary...');
+  try {
+    const response = await axios.get(FFMPEG_BINARY_URL, { responseType: 'stream' });
+    const tarPath = path.join(os.tmpdir(), 'ffmpeg.tar.xz');
+    const writer = fs.createWriteStream(tarPath);
+    response.data.pipe(writer);
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+    // Note: Requires `tar` to extract on Render (assumes available)
+    await new Promise((resolve, reject) => {
+      require('child_process').exec(`tar -xJf ${tarPath} -C ${os.tmpdir()} --strip-components=1`, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    await fs.remove(tarPath);
+    console.log('FFmpeg binary installed.');
+  } catch (err) {
+    console.error(`Failed to install FFmpeg binary: ${err.message}`);
+    throw err;
+  }
+}
+
+// Set FFmpeg path
+(async () => {
+  await ensureFFmpegBinary();
+  ffmpeg.setFfmpegPath(FFMPEG_PATH);
+})();
 
 let RTMP_URL = process.env.YOUTUBE_RTMP_URL || '';
-
-// Trim accidental prefix from env var
 if (RTMP_URL.startsWith('YOUTUBE_RTMP_URL=')) {
   RTMP_URL = RTMP_URL.replace(/^YOUTUBE_RTMP_URL=/, '');
 }
@@ -65,13 +100,12 @@ export default async function handler(req, res) {
   const tempDir = path.join(process.cwd(), 'temp');
   await fs.ensureDir(tempDir);
 
-  // Cleanup on process exit
-  process.on('exit', async () => {
-    await fs.remove(tempDir);
-  });
-  process.on('SIGTERM', async () => {
-    await fs.remove(tempDir);
-    process.exit(0);
+  // Cleanup on process signals
+  ['exit', 'SIGTERM', 'SIGINT'].forEach((signal) => {
+    process.on(signal, async () => {
+      await fs.remove(tempDir);
+      process.exit(0);
+    });
   });
 
   try {
@@ -79,13 +113,14 @@ export default async function handler(req, res) {
 
     const streamNextVideo = async () => {
       if (currentIndex >= validLinks.length) {
-        console.log('All videos streamed successfully.');
+        console.log('All videos processed.');
         await fs.remove(tempDir);
         return;
       }
 
       const currentVideo = validLinks[currentIndex];
       const tempFilePath = path.join(tempDir, `video_${currentIndex}.mp4`);
+      const reportPath = path.join(tempDir, `ffmpeg-report-${currentIndex}.log`);
 
       try {
         console.log(`Downloading ${currentVideo} to ${tempFilePath}`);
@@ -94,28 +129,26 @@ export default async function handler(req, res) {
         const command = ffmpeg()
           .input(tempFilePath)
           .inputOptions([
-            '-re', // Native frame rate
+            '-re',
             '-analyzeduration 20000000',
             '-probesize 20000000',
           ])
           .outputOptions([
-            '-c:v libx264',
-            '-preset ultrafast',
-            '-crf 30', // Higher CRF to reduce memory usage
-            '-maxrate 1000k', // Limit video bitrate
-            '-bufsize 2000k', // Smaller buffer for low memory
-            '-vf scale=640:360', // Downscale to reduce CPU load
-            '-c:a aac', // Explicitly re-encode audio to AAC
-            '-b:a 96k', // Lower audio bitrate
-            '-ar 44100', // Standard sample rate for compatibility
+            '-c:v copy', // Try copying video to avoid re-encoding
+            '-c:a aac', // Re-encode audio to AAC (Opus not supported by RTMP)
+            '-b:a 64k',
+            '-ar 22050',
             '-f flv',
             '-flvflags no_duration_filesize',
-            '-max_muxing_queue_size 4096',
+            '-max_muxing_queue_size 8192',
             '-err_detect ignore_err',
             '-avioflags direct',
-            '-threads 1', // Single-threaded to reduce CPU load
+            '-threads 1',
+            '-loglevel verbose', // Detailed logging
+            `-report`,
           ])
-          .output(RTMP_URL);
+          .output(RTMP_URL)
+          .save({ logfile: reportPath });
 
         command
           .on('start', (commandLine) => {
@@ -128,6 +161,7 @@ export default async function handler(req, res) {
           .on('end', async () => {
             console.log(`Finished streaming: ${currentVideo}`);
             await fs.remove(tempFilePath);
+            await fs.remove(reportPath);
             currentIndex++;
             streamNextVideo();
           })
@@ -135,21 +169,95 @@ export default async function handler(req, res) {
             console.error(`Error streaming ${currentVideo}: ${err.message}`);
             console.error(`FFmpeg stdout: ${stdout}`);
             console.error(`FFmpeg stderr: ${stderr}`);
-            await fs.remove(tempFilePath);
-            currentIndex++;
-            streamNextVideo();
+            if (await fs.pathExists(reportPath)) {
+              const report = await fs.readFile(reportPath, 'utf8');
+              console.error(`FFmpeg report: ${report}`);
+            }
+            // Fallback to re-encoding if copy fails
+            if (err.message.includes('copy')) {
+              console.log(`Retrying ${currentVideo} with re-encoding...`);
+              try {
+                const retryCommand = ffmpeg()
+                  .input(tempFilePath)
+                  .inputOptions([
+                    '-re',
+                    '-analyzeduration 20000000',
+                    '-probesize 20000000',
+                  ])
+                  .outputOptions([
+                    '-c:v libx264',
+                    '-preset ultrafast',
+                    '-crf 34',
+                    '-maxrate 600k',
+                    '-bufsize 1200k',
+                    '-vf scale=320:180', // Lowest resolution
+                    '-c:a aac',
+                    '-b:a 64k',
+                    '-ar 22050',
+                    '-f flv',
+                    '-flvflags no_duration_filesize',
+                    '-max_muxing_queue_size 8192',
+                    '-err_detect ignore_err',
+                    '-avioflags direct',
+                    '-threads 1',
+                    '-loglevel verbose',
+                    `-report`,
+                  ])
+                  .output(RTMP_URL)
+                  .save({ logfile: reportPath });
+
+                retryCommand
+                  .on('start', (commandLine) => {
+                    console.log(`FFmpeg retry started: ${currentVideo}`);
+                    console.log(`FFmpeg command: ${commandLine}`);
+                  })
+                  .on('end', async () => {
+                    console.log(`Finished retry streaming: ${currentVideo}`);
+                    await fs.remove(tempFilePath);
+                    await fs.remove(reportPath);
+                    currentIndex++;
+                    streamNextVideo();
+                  })
+                  .on('error', async (err, stdout, stderr) => {
+                    console.error(`Retry error for ${currentVideo}: ${err.message}`);
+                    console.error(`FFmpeg stdout: ${stdout}`);
+                    console.error(`FFmpeg stderr: ${stderr}`);
+                    if (await fs.pathExists(reportPath)) {
+                      const report = await fs.readFile(reportPath, 'utf8');
+                      console.error(`FFmpeg retry report: ${report}`);
+                    }
+                    await fs.remove(tempFilePath);
+                    await fs.remove(reportPath);
+                    currentIndex++;
+                    streamNextVideo();
+                  })
+                  .run();
+              } catch (retryErr) {
+                console.error(`Retry failed for ${currentVideo}: ${retryErr.message}`);
+                await fs.remove(tempFilePath);
+                await fs.remove(reportPath);
+                currentIndex++;
+                streamNextVideo();
+              }
+            } else {
+              await fs.remove(tempFilePath);
+              await fs.remove(reportPath);
+              currentIndex++;
+              streamNextVideo();
+            }
           })
           .run();
       } catch (err) {
         console.error(`Error processing ${currentVideo}: ${err.message}`);
         await fs.remove(tempFilePath);
+        await fs.remove(reportPath);
         currentIndex++;
         streamNextVideo();
       }
     };
 
     streamNextVideo();
-    res.status(200).json({ message: 'Streaming started. Check YouTube Studio and Render logs for progress.' });
+    res.status(200).json({ message: 'Streaming started. Check YouTube Studio and Render logs (FFmpeg reports) for progress.' });
   } catch (err) {
     await fs.remove(tempDir);
     res.status(500).json({ error: `Server error: ${err.message}` });
