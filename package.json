@@ -17,7 +17,7 @@
     "axios": "^1.7.2"
   },
   "devDependencies": {
-    "tar": "^6.2.1" // For extracting FFmpeg binary
+    "tar": "^6.2.1" 
   },
   "author": "Your Name",
   "license": "MIT"
