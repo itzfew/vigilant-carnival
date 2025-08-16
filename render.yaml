@@ -1,4 +1,4 @@
- services:
+services:
   - type: web
     name: youtube-ffmpeg-livestream
     env: docker
@@ -6,6 +6,10 @@
     autoDeploy: true
     envVars:
       - key: YOUTUBE_RTMP_URL
-        sync: false # Set this in Render dashboard
+        sync: false
       - key: NODE_ENV
         value: production
+    buildCommand: |
+      apt-get update && apt-get install -y tar
+      yarn install
+    startCommand: yarn start
