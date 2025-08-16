@@ -8,7 +8,7 @@ ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 
 let RTMP_URL = process.env.YOUTUBE_RTMP_URL || '';
 
-// Trim any accidental prefix from env var (e.g., if copy-pasted from shell)
+// Trim accidental prefix from env var
 if (RTMP_URL.startsWith('YOUTUBE_RTMP_URL=')) {
   RTMP_URL = RTMP_URL.replace(/^YOUTUBE_RTMP_URL=/, '');
 }
@@ -39,17 +39,16 @@ async function downloadVideo(url, outputPath) {
 
 export default async function handler(req, res) {
   if (!RTMP_URL.startsWith('rtmp://')) {
-    return res.status(500).json({ error: 'Invalid or missing YOUTUBE_RTMP_URL in environment (must start with rtmp://)' });
+    return res.status(500).json({ error: 'Invalid or missing YOUTUBE_RTMP_URL (must start with rtmp://)' });
   }
 
-  const { links } = req.query; // e.g., ?links=url1,url2
+  const { links } = req.query;
   const videoLinks = links ? links.split(',').map(link => link.trim()).filter(link => link) : [];
 
   if (!videoLinks.length) {
     return res.status(400).json({ error: 'No video links provided' });
   }
 
-  // Validate URLs
   const validLinks = [];
   for (const link of videoLinks) {
     if (await isUrlAccessible(link)) {
@@ -66,9 +65,13 @@ export default async function handler(req, res) {
   const tempDir = path.join(process.cwd(), 'temp');
   await fs.ensureDir(tempDir);
 
-  // Cleanup temp dir on process exit
+  // Cleanup on process exit
   process.on('exit', async () => {
     await fs.remove(tempDir);
+  });
+  process.on('SIGTERM', async () => {
+    await fs.remove(tempDir);
+    process.exit(0);
   });
 
   try {
@@ -76,9 +79,9 @@ export default async function handler(req, res) {
 
     const streamNextVideo = async () => {
       if (currentIndex >= validLinks.length) {
-        console.log('All videos streamed.');
+        console.log('All videos streamed successfully.');
         await fs.remove(tempDir);
-        return; // Don't send response again
+        return;
       }
 
       const currentVideo = validLinks[currentIndex];
@@ -91,22 +94,26 @@ export default async function handler(req, res) {
         const command = ffmpeg()
           .input(tempFilePath)
           .inputOptions([
-            '-re', // Read at native frame rate
+            '-re', // Native frame rate
             '-analyzeduration 20000000',
             '-probesize 20000000',
           ])
           .outputOptions([
             '-c:v libx264',
             '-preset ultrafast',
-            '-crf 28',
-            '-bufsize 3000k', // Added for better buffering on low resources
-            '-c:a aac',
-            '-b:a 128k',
+            '-crf 30', // Higher CRF to reduce memory usage
+            '-maxrate 1000k', // Limit video bitrate
+            '-bufsize 2000k', // Smaller buffer for low memory
+            '-vf scale=640:360', // Downscale to reduce CPU load
+            '-c:a aac', // Explicitly re-encode audio to AAC
+            '-b:a 96k', // Lower audio bitrate
+            '-ar 44100', // Standard sample rate for compatibility
             '-f flv',
             '-flvflags no_duration_filesize',
-            '-max_muxing_queue_size 4096', // Increased further
+            '-max_muxing_queue_size 4096',
             '-err_detect ignore_err',
             '-avioflags direct',
+            '-threads 1', // Single-threaded to reduce CPU load
           ])
           .output(RTMP_URL);
 
@@ -130,7 +137,7 @@ export default async function handler(req, res) {
             console.error(`FFmpeg stderr: ${stderr}`);
             await fs.remove(tempFilePath);
             currentIndex++;
-            streamNextVideo(); // Continue to next
+            streamNextVideo();
           })
           .run();
       } catch (err) {
@@ -141,11 +148,8 @@ export default async function handler(req, res) {
       }
     };
 
-    // Start the chain
     streamNextVideo();
-
-    // Send initial response immediately
-    res.status(200).json({ message: 'Streaming started. Check YouTube dashboard and Render logs for progress/errors.' });
+    res.status(200).json({ message: 'Streaming started. Check YouTube Studio and Render logs for progress.' });
   } catch (err) {
     await fs.remove(tempDir);
     res.status(500).json({ error: `Server error: ${err.message}` });
